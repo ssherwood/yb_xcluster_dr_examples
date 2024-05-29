@@ -1,31 +1,20 @@
 import json
-import yaml
 import time
 from pprint import pprint
 
 import requests
+import yaml
 
 # os.environ['REQUESTS_CA_BUNDLE'] = "./ca_cert.pem"
 
 # Suppress only the single warning from urllib3 needed.
 requests.urllib3.disable_warnings()
 
-# override the methods which you use
-requests.post = lambda url, **kwargs: requests.request(
-    method="POST", url=url, verify=False, **kwargs
-)
-
-requests.put = lambda url, **kwargs: requests.request(
-    method="PUT", url=url, verify=False, **kwargs
-)
-
-requests.get = lambda url, **kwargs: requests.request(
-    method="GET", url=url, verify=False, **kwargs
-)
-
-requests.delete = lambda url, **kwargs: requests.request(
-    method="DELETE", url=url, verify=False, **kwargs
-)
+# override the methods to set verify=False
+requests.get = lambda url, **kwargs: requests.request(method="GET", url=url, verify=False, **kwargs)
+requests.post = lambda url, **kwargs: requests.request(method="POST", url=url, verify=False, **kwargs)
+requests.put = lambda url, **kwargs: requests.request(method="PUT", url=url, verify=False, **kwargs)
+requests.delete = lambda url, **kwargs: requests.request(method="DELETE", url=url, verify=False, **kwargs)
 
 with open('auth.yaml', 'r') as file:
     auth_data = yaml.safe_load(file)
@@ -60,35 +49,31 @@ def get_task_data(customer_uuid, task_uuid) -> json:
 #
 # Helper function that waits for a given task to complete and updates the console every sleep interval.
 #
-# Inputs:
-# - Customer UUID
-# - Task response body (json)
-# - Friendly task name to display in output (optional)
-# - An interval to sleep while task is running (optional)
+# Input(s):
+# customer_uuid: uuid - the customer UUID
+# task_response: json - the task response body (json) from the action
+# friendly_name: str - a friendly task name to display in output (optional)
+# sleep_interval: int - an interval to sleep while task is running (optional)
 #
-def wait_for_task(customer_uuid, action_response, friendly_name="UNKNOWN", sleep_interval=15) -> str:
-    if "taskUUID" not in action_response:
-        raise RuntimeError(f"ERROR: failed to process '{friendly_name}' no taskUUID? {action_response}")
+def wait_for_task(customer_uuid, task_response, friendly_name="UNKNOWN", sleep_interval=15) -> str:
+    if 'taskUUID' not in task_response:
+        raise RuntimeError(f"ERROR: failed to process '{friendly_name}' no taskUUID? {task_response}")
 
-    task_uuid = action_response["taskUUID"]
-    resource_uuid = action_response["resourceUUID"]
+    task_uuid = task_response['taskUUID']
+    resource_uuid = task_response['resourceUUID']
 
     while True:
         task_status = get_task_data(customer_uuid, task_uuid)
-
-        match task_status["status"]:
-            case "Success":
+        match task_status['status']:
+            case 'Success':
                 print(f"Task '{friendly_name}': {task_uuid} finished successfully!")
                 return resource_uuid
-            case "Failure":
+            case 'Failure':
                 failure_message = f"Task '{friendly_name}': {task_uuid} failed, but could not get the failure messages"
                 action_failed_response = requests.get(
-                    url=f"{YBA_URL}/api/customers/{customer_uuid}/tasks/{task_uuid}/failed",
-                    headers=API_HEADERS).json()
-                if "failedSubTasks" in action_failed_response:
-                    errors = [
-                        subtask["errorString"] for subtask in action_failed_response["failedSubTasks"]
-                    ]
+                    url=f"{YBA_URL}/api/customers/{customer_uuid}/tasks/{task_uuid}/failed", headers=API_HEADERS).json()
+                if 'failedSubTasks' in action_failed_response:
+                    errors = [subtask['errorString'] for subtask in action_failed_response['failedSubTasks']]
                     failure_message = (f"Task '{friendly_name}': {task_uuid} failed with the following errors: " +
                                        "\n".join(errors))
 
@@ -111,17 +96,6 @@ def _get_session_info() -> json:
 def _get_universe_by_name(customer_uuid, universe_name: str) -> json:
     return requests.get(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/universes?name={universe_name}",
                         headers=API_HEADERS).json()
-
-
-#
-#
-#
-def _get_universe_uuid_by_name(customer_uuid, universe_name) -> str:
-    universe = next(iter(_get_universe_by_name(customer_uuid, universe_name)), None)
-    if universe is None:
-        raise RuntimeError(f"ERROR: failed to find a universe '{universe_name}' by name")
-    else:
-        return universe["universeUUID"]
 
 
 #
@@ -149,19 +123,24 @@ def get_configs_by_type(customer_uuid, config_type) -> json:
 
 
 #
+# Helper method to return the universeUUID of the universe from a given name.
+#
+def get_universe_uuid_by_name(customer_uuid, universe_name: str) -> str:
+    universe = next(iter(_get_universe_by_name(customer_uuid, universe_name)), None)
+    if universe is None:
+        raise RuntimeError(f"ERROR: failed to find a universe '{universe_name}' by name")
+    else:
+        return universe['universeUUID']
+
+
 #
 #
-def get_database_name_map(customer_uuid, universe_uuid) -> list:
+#
+def get_database_namespaces(customer_uuid, universe_uuid, table_type='PGSQL_TABLE_TYPE') -> list:
     response = requests.get(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/universes/{universe_uuid}/namespaces",
                             headers=API_HEADERS).json()
-    ysql_database_list = [
-        db for db in list(filter(lambda db: db["tableType"] == "PGSQL_TABLE_TYPE", response))
-    ]
-    # ysql_database_name_list = [db["name"] for db in ysql_database_list]
-    # pprint(ysql_database_name_list)
-    # ysql_database_uuid_list = [db["namespaceUUID"] for db in ysql_database_list]
-    # pprint(ysql_database_uuid_list)
-    return ysql_database_list
+    # pprint(response)
+    return list(filter(lambda db: db['tableType'] == table_type, response))
 
 
 #
@@ -183,11 +162,9 @@ def _get_all_ysql_tables_list(customer_uuid, universe_uuid, include_parent_table
                             headers=API_HEADERS).json()
     # pprint(response)
     if dbs_list is None:
-        return [t for t in
-                list(filter(lambda t: t["tableType"] == "PGSQL_TABLE_TYPE", response))]
+        return list(filter(lambda t: t['tableType'] == 'PGSQL_TABLE_TYPE', response))
     else:
-        return [t for t in
-                list(filter(lambda t: t["tableType"] == "PGSQL_TABLE_TYPE" and t['keySpace'] in dbs_list, response))]
+        return list(filter(lambda t: t['tableType'] == 'PGSQL_TABLE_TYPE' and t['keySpace'] in dbs_list, response))
 
 
 #
@@ -263,7 +240,7 @@ def _set_tables_in_dr_config(customer_uuid, _dr_config_uuid, storage_config_uuid
         },
         "tables": tables_include_list
     }
-    pprint(disaster_recovery_set_tables_form_data)
+    # pprint(disaster_recovery_set_tables_form_data)
 
     return requests.post(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/dr_configs/{_dr_config_uuid}/set_tables",
                          json=disaster_recovery_set_tables_form_data, headers=API_HEADERS).json()
@@ -300,7 +277,7 @@ def get_source_xcluster_dr_config(customer_uuid, source_universe_name) -> json:
     if source_universe_details is None:
         raise RuntimeError(f"ERROR: the universe '{source_universe_name}' was not found.")
     else:
-        dr_config_source_uuid = next(iter(source_universe_details["drConfigUuidsAsSource"]), None)
+        dr_config_source_uuid = next(iter(source_universe_details['drConfigUuidsAsSource']), None)
         if dr_config_source_uuid is None:
             raise RuntimeError(f"ERROR: the universe '{source_universe_name}' does not have a DR config.")
         else:
@@ -311,53 +288,49 @@ def get_source_xcluster_dr_config(customer_uuid, source_universe_name) -> json:
 #
 #
 def create_xcluster_dr(customer_uuid, source_universe_name, target_universe_name, db_names=None, dry_run=False) -> json:
-    storage_configs = get_configs_by_type(customer_uuid, "STORAGE")
+    storage_configs = get_configs_by_type(customer_uuid, 'STORAGE')
     # pprint(storage_configs)
     if len(storage_configs) < 1:
-        print("WARN: no storage configs found, at least one is required for xCluster DR setup!")
-        return
+        raise RuntimeError('WARN: no storage configs found, at least one is required for xCluster DR setup!')
 
-    storage_config_uuid = storage_configs[0]["configUUID"]  # todo how do we select this at scale?
-    # pprint(storage_configs[0])
+    storage_config_uuid = storage_configs[0]['configUUID']  # todo how do we select this at scale?
+    # pprint(storage_config_uuid)
 
     get_source_universe_response = _get_universe_by_name(customer_uuid, source_universe_name)
     source_universe_details = next(iter(get_source_universe_response), None)
     # pprint(universe_details)
     if source_universe_details is None:
-        print(f"ERROR: the universe '{source_universe_name}' was not found")
-        return
+        raise RuntimeError(f"ERROR: the universe '{source_universe_name}' was not found")
 
-    source_universe_uuid = source_universe_details["universeUUID"]
+    source_universe_uuid = source_universe_details['universeUUID']
     # pprint(source_universe_uuid)
 
-    dr_config_source_uuid = next(iter(source_universe_details["drConfigUuidsAsSource"]), None)
+    dr_config_source_uuid = next(iter(source_universe_details['drConfigUuidsAsSource']), None)
     if dr_config_source_uuid is not None:
         # dr_config = get_dr_configs(session_uuid, dr_config_source_uuid)
         # pprint(dr_config)
-        print(f"WARN: the source universe '{source_universe_name}' already has a disaster-recovery config:"
-              f" {dr_config_source_uuid},")
-        return
+        raise RuntimeError(f"WARN: the source universe '{source_universe_name}' already has a disaster-recovery config:"
+                           f" {dr_config_source_uuid},")
 
     target_universe_response = _get_universe_by_name(customer_uuid, target_universe_name)
     target_universe_details = next(iter(target_universe_response), None)
     # pprint(target_universe_details)
     if target_universe_details is None:
-        print(f"ERROR: the universe '{target_universe_name}' was not found")
-        return
+        raise RuntimeError(f"ERROR: the target universe '{target_universe_name}' was not found")
 
-    target_universe_uuid = target_universe_details["universeUUID"]
+    target_universe_uuid = target_universe_details['universeUUID']
     # pprint(target_universe_uuid)
 
-    dbs_list = get_database_name_map(customer_uuid, source_universe_uuid)
+    dbs_list = get_database_namespaces(customer_uuid, source_universe_uuid)
     dbs_list_uuids = [d['namespaceUUID'] for d in dbs_list if d['name'] in db_names]
     # pprint(dbs_list_uuids)
 
     create_dr_response = _create_dr_config(customer_uuid, storage_config_uuid,
                                            source_universe_uuid, target_universe_uuid,
                                            dbs_list_uuids, dry_run=dry_run)
-    wait_for_task(customer_uuid, create_dr_response, "Create xCluster DR")
+    wait_for_task(customer_uuid, create_dr_response, 'Create xCluster DR')
 
-    dr_config_uuid = create_dr_response["resourceUUID"]
+    dr_config_uuid = create_dr_response['resourceUUID']
     print(f"SUCCESS: created disaster-recovery config {dr_config_uuid}")
     return dr_config_uuid
 
@@ -367,8 +340,8 @@ def create_xcluster_dr(customer_uuid, source_universe_name, target_universe_name
 # This method can be externalized as it simplifies use of the underlying YBA API.
 #
 # Input(s)
-# - customer_uuid: the UUID of the Customer
-# - source_universe_name: the friendly name of the source universe
+# - customer_uuid: str - the customer uuid
+# - source_universe_name: str - the name of the source universe
 #
 def delete_xcluster_dr(customer_uuid, source_universe_name) -> str:
     get_universe_response = _get_universe_by_name(customer_uuid, source_universe_name)
@@ -397,7 +370,7 @@ def delete_xcluster_dr(customer_uuid, source_universe_name) -> str:
 # already exist there too.
 #
 def get_xcluster_dr_available_tables(customer_uuid, universe_name) -> list:
-    universe_uuid = _get_universe_uuid_by_name(customer_uuid, universe_name)
+    universe_uuid = get_universe_uuid_by_name(customer_uuid, universe_name)
     all_tables_list = _get_all_ysql_tables_list(customer_uuid, universe_uuid)
     # pprint(all_tables_list)
 
@@ -412,6 +385,87 @@ def get_xcluster_dr_available_tables(customer_uuid, universe_name) -> list:
     return available_tables_list
 
 
+#
+# Adds a set of tables to replication in an existing xCluster DR config.
+#
+# See also: https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/570cb66189f0d-set-tables-in-disaster-recovery-config
+#
+# Input(s)
+# - customer_uuid: str - the customer uuid
+# - source_universe_name: str - the name of the source universe
+# - add_tables_ids: set<str> - a set of table ids to add to replication
+#
+def add_tables_to_xcluster_dr(customer_uuid: str, source_universe_name: str, add_tables_ids: set):
+    xcluster_dr_config = get_source_xcluster_dr_config(customer_uuid, source_universe_name)
+    # pprint(xcluster_dr_config)
+    xcluster_dr_uuid = xcluster_dr_config['uuid']
+    storage_config_uuid = xcluster_dr_config['bootstrapParams']['backupRequestParams']['storageConfigUUID']
+
+    # get the list of table(s) that can be added to the xCluster DR
+    available_dr_tables = get_xcluster_dr_available_tables(customer_uuid, source_universe_name)
+    # pprint(available_dr_tables)
+
+    # only include tables that match the provided add_tables_ids
+    filtered_dr_tables_list = list(filter(lambda t: t['tableID'] in add_tables_ids, available_dr_tables))
+    # pprint(filtered_dr_tables_list)
+    if len(filtered_dr_tables_list) == 0:
+        raise RuntimeError(f"🤯: no table(s) can be found to add to the xCluster DR config!")
+
+    # TODO should WARN (or ERROR) if source table has a size > 0
+    _validate_dr_replica_tables(customer_uuid, xcluster_dr_config['drReplicaUniverseUuid'], filtered_dr_tables_list)
+
+    merged_dr_tables_list = xcluster_dr_config['tables'] + [t['tableID'] for t in available_dr_tables]
+    # pprint(merged_dr_tables_list)
+
+    resp = _set_tables_in_dr_config(customer_uuid, xcluster_dr_uuid, storage_config_uuid, merged_dr_tables_list)
+    wait_for_task(customer_uuid, resp, "Add YSQL Tables")
+
+
+def _validate_dr_replica_tables(customer_uuid, dr_replica_universe_uuid, filtered_dr_tables_list):
+    replica_tables_list = _get_all_ysql_tables_list(customer_uuid, dr_replica_universe_uuid)
+    # pprint(replica_tables_list)
+    # error if the replica cluster does not already have the same table(s)
+    for table in filtered_dr_tables_list:
+        found = False
+        for replica_table in replica_tables_list:
+            if (table['keySpace'] == replica_table['keySpace'] and
+                    table['pgSchemaName'] == replica_table['pgSchemaName'] and
+                    table['tableName'] == replica_table['tableName']):
+                found = True
+        if not found:
+            raise RuntimeError(
+                f"ERROR: No matching table: '{table['keySpace']}'.'{table['pgSchemaName']}'.'{table['tableName']}'"
+                f" found in the target xCluster DR replica!")
+
+
+#
+# Removes a set of tables from replication from an existing xCluster DR config.
+#
+# See also: https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/570cb66189f0d-set-tables-in-disaster-recovery-config
+#
+# Input(s)
+# - customer_uuid: str - the customer uuid
+# - source_universe_name: str - the name of the source universe
+# - remove_tables_ids: set<str> - a set of table ids to remove
+#
+# If no table ids can be removed from the existing config an exception will be raised.
+#
+def remove_tables_from_xcluster_dr(customer_uuid: str, source_universe_name: str, remove_tables_ids: set):
+    xcluster_dr_config = get_source_xcluster_dr_config(customer_uuid, source_universe_name)
+    # pprint(xcluster_dr_config)
+    xcluster_dr_uuid = xcluster_dr_config['uuid']
+    storage_config_uuid = xcluster_dr_config['bootstrapParams']['backupRequestParams']['storageConfigUUID']
+
+    filtered_dr_tables_list = list(filter(lambda t: t not in remove_tables_ids, xcluster_dr_config['tables']))
+    # pprint(filtered_dr_tables_list)
+
+    if len(filtered_dr_tables_list) == len(xcluster_dr_config['tables']):
+        raise RuntimeError(f"ERROR: no table(s) can be removed from the xCluster DR config!")
+
+    resp = _set_tables_in_dr_config(customer_uuid, xcluster_dr_uuid, storage_config_uuid, filtered_dr_tables_list)
+    wait_for_task(customer_uuid, resp, "Removing YSQL Tables from xCluster DR")
+
+
 def testing():
     # Testing Section
     # ---------------
@@ -419,53 +473,31 @@ def testing():
     customer_uuid = user_session['customerUUID']
     source_universe_name = 'ssherwood-xcluster-east'
     target_universe_name = 'ssherwood-xcluster-central'
-    include_database_names = ['yugabyte', 'yugabyte2']
+    include_database_names = {'yugabyte', 'yugabyte2'}
     test_task_uuid = 'aac2ded4-0b54-4818-affd-fc8ca40c69b1'
+    add_list = {'00004000000030008000000000004002'}
+    remove_list = {'00004000000030008000000000004002'}
 
     # todo, show how to get the xcluster uuid from the dr config
-    execute_option = '_get_all_ysql_tables_list'
+    execute_option = 'add_tables_to_xcluster_dr'
 
     try:
-        universe_uuid = _get_universe_uuid_by_name(customer_uuid, source_universe_name)
+        universe_uuid = get_universe_uuid_by_name(customer_uuid, source_universe_name)
 
         match execute_option:
             case 'test':
-                dbs_list = get_database_name_map(customer_uuid, universe_uuid)
+                dbs_list = get_database_namespaces(customer_uuid, universe_uuid)
+                pprint(dbs_list)
             case '_get_all_ysql_tables_list':
                 tables_list = _get_all_ysql_tables_list(customer_uuid, universe_uuid)
                 pprint(tables_list)
             case 'get-available-xcluster-dr-tables-list':
                 available_xcluster_dr_tables = get_xcluster_dr_available_tables(customer_uuid, source_universe_name)
                 pprint(available_xcluster_dr_tables)
-            case 'set-xcluster-dr-ysql-tables-included':
-                xcluster_dr_existing_tables_id = get_source_xcluster_dr_config(customer_uuid, source_universe_name)[
-                    'tables']
-                # pprint(xcluster_dr_existing_tables_id)
-
-                all_ysql_tables = get_xcluster_dr_available_tables(customer_uuid, source_universe_name)
-                # pprint(all_ysql_tables)
-
-                ysql_available_tables_list = [
-                    tbl for tbl in
-                    list(filter(lambda tbl: tbl[2] not in xcluster_dr_existing_tables_id, all_ysql_tables))
-                ]
-                pprint(ysql_available_tables_list)
-
-                l = [t[2] for t in ysql_available_tables_list]
-                pprint(l)
-
-                ysql_merged_tables_list = xcluster_dr_existing_tables_id + l
-
-                xcluster_dr = get_source_xcluster_dr_config(customer_uuid, source_universe_name)
-                # pprint(xcluster_dr)
-                storage_config_uuid = xcluster_dr['bootstrapParams']['backupRequestParams']['storageConfigUUID']
-                xcluster_dr_uuid = xcluster_dr['uuid']
-
-                # pprint(ysql_merged_tables_list)
-                resp = _set_tables_in_dr_config(customer_uuid, xcluster_dr_uuid, storage_config_uuid,
-                                                ysql_merged_tables_list)
-                wait_for_task(customer_uuid, resp, "Set Tables")
-
+            case 'add_tables_to_xcluster_dr':
+                add_tables_to_xcluster_dr(customer_uuid, source_universe_name, add_list)
+            case 'remove_tables_from_xcluster_dr':
+                remove_tables_from_xcluster_dr(customer_uuid, source_universe_name, remove_list)
             case 'get-xcluster-dr':
                 pprint(get_source_xcluster_dr_config(customer_uuid, source_universe_name))
             case 'create-xcluster-dr':
