@@ -207,7 +207,8 @@ def _create_dr_config(customer_uuid, _storage_config_uuid, source_universe_uuid,
 
 #
 # Delete a xCluster DR config.
-# See: https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/defcf45434fc0-delete-xcluster-config
+#
+# See also: https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/defcf45434fc0-delete-xcluster-config
 #
 # Input
 # - a Customer UUID
@@ -226,9 +227,27 @@ def _delete_dr_config(customer_uuid, _dr_config_uuid, is_force_delete=False) -> 
 
 
 #
-# https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/570cb66189f0d-set-tables-in-disaster-recovery-config
+# Low level YBA API call to update the set of tables that are included in the xCluster DR.
+# As this is a POST operation, the tables list should always contain the full set of table IDs intended to be used in
+# xCluster DR replication.  This also means that to remove tables, the POST should contain the existing set of tables
+# minus the tables to be removed (the API does not support DELETE).
 #
-def _set_tables_in_dr_config(customer_uuid, _dr_config_uuid, storage_config_uuid, tables_include_list=None,
+# See also: https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/570cb66189f0d-set-tables-in-disaster-recovery-config
+#
+# Input(s)
+# - customer_uuid: str - the Customer UUID
+# - dr_config_uuid: str - the xCluster DR config to use
+# - storage_config_uuid: str - the backup/restore config to use
+# - tables_include_list: list<str> - list of table IDs to include in replication
+# - auto_include_indexes: bool - automatically include indexes; default: true
+# - parallelism: int - limits the number of parallel threads used to perform any backup/restore; default: 8
+#
+# Output:
+# - JSON
+#   - resourceUUID: str - the resource UUID
+#   - taskUUID: str - the task UUID
+#
+def _set_tables_in_dr_config(customer_uuid, dr_config_uuid, storage_config_uuid, tables_include_list=None,
                              auto_include_indexes=True, parallelism=8) -> json:
     disaster_recovery_set_tables_form_data = {
         "autoIncludeIndexTables": auto_include_indexes,
@@ -242,12 +261,12 @@ def _set_tables_in_dr_config(customer_uuid, _dr_config_uuid, storage_config_uuid
     }
     # pprint(disaster_recovery_set_tables_form_data)
 
-    return requests.post(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/dr_configs/{_dr_config_uuid}/set_tables",
+    return requests.post(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/dr_configs/{dr_config_uuid}/set_tables",
                          json=disaster_recovery_set_tables_form_data, headers=API_HEADERS).json()
 
 
 #
-#
+# Pauses the underlying xCluster replication.
 #
 def pause_xcluster_config(customer_uuid, xcluster_config_uuid) -> json:
     xcluster_replication_edit_form_data = {
@@ -258,7 +277,7 @@ def pause_xcluster_config(customer_uuid, xcluster_config_uuid) -> json:
 
 
 #
-#
+# Resumes the underlying xCluster replication.
 #
 def resume_xcluster_config(customer_uuid, xcluster_config_uuid) -> json:
     xcluster_replication_edit_form_data = {
@@ -421,27 +440,38 @@ def add_tables_to_xcluster_dr(customer_uuid: str, source_universe_name: str, add
     wait_for_task(customer_uuid, resp, "Add YSQL Tables")
 
 
-def _validate_dr_replica_tables(customer_uuid, dr_replica_universe_uuid, filtered_dr_tables_list):
+#
+# Validates that the target xCluster DR (replica) actually contains the table(s) that are going to be
+# added to the xCluster DR config of the source.  This cause an error as it can't replicate table(s) that don't
+# already exist on the target.
+#
+# No additional correctness is checked to ensure the replica's table(s) contains the same fields - this is left up to
+# the users to ensure the exact same DDL is being issued to both sides of the xCluster config.
+#
+# Input(s)
+# - customer_uuid: str - the customer uuid
+# - dr_replica_universe_uuid: str - the uuid of the target (replica) universe
+# - source_dr_tables_add_list: list<dict> - a list of tables to be added to the source DR
+#
+# If the target replica does not have the source table(s) then an exception will be raised
+#
+def _validate_dr_replica_tables(customer_uuid, dr_replica_universe_uuid, source_dr_tables_add_list):
+    keys_to_match = ['keySpace', 'pgSchemaName', 'tableName']  # these keys define a unique table
     replica_tables_list = _get_all_ysql_tables_list(customer_uuid, dr_replica_universe_uuid)
-    # pprint(replica_tables_list)
-    # error if the replica cluster does not already have the same table(s)
-    for table in filtered_dr_tables_list:
-        found = False
-        for replica_table in replica_tables_list:
-            if (table['keySpace'] == replica_table['keySpace'] and
-                    table['pgSchemaName'] == replica_table['pgSchemaName'] and
-                    table['tableName'] == replica_table['tableName']):
-                found = True
-        if not found:
-            raise RuntimeError(
-                f"ERROR: No matching table: '{table['keySpace']}'.'{table['pgSchemaName']}'.'{table['tableName']}'"
-                f" found in the target xCluster DR replica!")
+    replica_tables_set = {tuple(d[key] for key in keys_to_match) for d in replica_tables_list}
+    tables_not_found = [
+        t for t in source_dr_tables_add_list if tuple(t[key] for key in keys_to_match) not in replica_tables_set
+    ]
+    # pprint(tables_not_found)
+    if len(tables_not_found) > 0:
+        raise RuntimeError(f"ERROR: No matching table(s): {tables_not_found} found in the xCluster DR replica!")
 
 
 #
 # Removes a set of tables from replication from an existing xCluster DR config.
 #
-# See also: https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/570cb66189f0d-set-tables-in-disaster-recovery-config
+# This call should be made BEFORE performing a DROP TABLE operation.  Once the table(s) are removed from replication
+# drop the table(s) from the replica first and then from the primary.
 #
 # Input(s)
 # - customer_uuid: str - the customer uuid
@@ -466,9 +496,10 @@ def remove_tables_from_xcluster_dr(customer_uuid: str, source_universe_name: str
     wait_for_task(customer_uuid, resp, "Removing YSQL Tables from xCluster DR")
 
 
+#
+# Testing Section
+# ---------------
 def testing():
-    # Testing Section
-    # ---------------
     user_session = _get_session_info()
     customer_uuid = user_session['customerUUID']
     source_universe_name = 'ssherwood-xcluster-east'
@@ -478,37 +509,48 @@ def testing():
     add_list = {'00004000000030008000000000004002'}
     remove_list = {'00004000000030008000000000004002'}
 
-    # todo, show how to get the xcluster uuid from the dr config
-    execute_option = 'add_tables_to_xcluster_dr'
-
     try:
+        execute_option = '_validate_dr_replica_tables'
         universe_uuid = get_universe_uuid_by_name(customer_uuid, source_universe_name)
+        target_universe_uuid = get_universe_uuid_by_name(customer_uuid, target_universe_name)
 
         match execute_option:
             case 'test':
                 dbs_list = get_database_namespaces(customer_uuid, universe_uuid)
                 pprint(dbs_list)
             case '_get_all_ysql_tables_list':
-                tables_list = _get_all_ysql_tables_list(customer_uuid, universe_uuid)
-                pprint(tables_list)
-            case 'get-available-xcluster-dr-tables-list':
+                pprint(_get_all_ysql_tables_list(customer_uuid, universe_uuid))
+            case 'get_xcluster_dr_available_tables':
                 available_xcluster_dr_tables = get_xcluster_dr_available_tables(customer_uuid, source_universe_name)
                 pprint(available_xcluster_dr_tables)
             case 'add_tables_to_xcluster_dr':
                 add_tables_to_xcluster_dr(customer_uuid, source_universe_name, add_list)
             case 'remove_tables_from_xcluster_dr':
                 remove_tables_from_xcluster_dr(customer_uuid, source_universe_name, remove_list)
-            case 'get-xcluster-dr':
+            case '_validate_dr_replica_tables':
+                tables_list = [{'colocated': False,
+                                'isIndexTable': False,
+                                'keySpace': 'yugabyte2',
+                                'pgSchemaName': 'public2',
+                                'relationType': 'USER_TABLE_RELATION',
+                                'sizeBytes': 0.0,
+                                'tableID': '00004000000030008000000000004002',
+                                'tableName': 'foo',
+                                'tableType': 'PGSQL_TABLE_TYPE',
+                                'tableUUID': '00004000-0000-3000-8000-000000004002',
+                                'walSizeBytes': 6291456.0}]
+                _validate_dr_replica_tables(customer_uuid, target_universe_uuid, tables_list)
+            case 'get_source_xcluster_dr_config':
                 pprint(get_source_xcluster_dr_config(customer_uuid, source_universe_name))
-            case 'create-xcluster-dr':
+            case 'create_xcluster_dr':
                 create_xcluster_dr(customer_uuid, source_universe_name, target_universe_name, include_database_names)
-            case 'delete-xcluster-dr':
+            case 'delete_xcluster_dr':
                 delete_xcluster_dr(customer_uuid, source_universe_name)
-            case 'get-task-data':
+            case 'get_task_data':
                 pprint(get_task_data(customer_uuid, test_task_uuid))
-            case 'pause-dr-xcluster':
+            case 'pause_xcluster_config':
                 pause_xcluster_config(customer_uuid, '')
-            case 'resume-dr-xcluster':
+            case 'resume_xcluster_config':
                 resume_xcluster_config(customer_uuid, '')
     except Exception as ex:
         print(ex)
@@ -530,6 +572,5 @@ testing()
 #
 # NOTE: if any data is in the source/target this will trigger a full copy!
 #
-
 
 # SPECIAL RULES FOR COLOCATION!
