@@ -115,9 +115,11 @@ def _get_dr_configs(customer_uuid, dr_uuid) -> json:
 
 
 #
+# Return configs of a specific config type.  This is useful for getting things like STORAGE configs.
 #
+# https://api-docs.yugabyte.com/docs/yugabyte-platform/d09c43e4a8bfd-list-all-customer-configurations
 #
-def get_configs_by_type(customer_uuid, config_type) -> json:
+def _get_configs_by_type(customer_uuid, config_type) -> json:
     response = requests.get(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/configs", headers=API_HEADERS).json()
     return list(filter(lambda config: config["type"] == config_type, response))
 
@@ -134,7 +136,16 @@ def get_universe_uuid_by_name(customer_uuid, universe_name: str) -> str:
 
 
 #
+# Returns a list of database "namespaces" filtered by a given type.  For xCluster DR this is going to be
+# PGSQL_TABLE_TYPE (which is the default).
 #
+# https://api-docs.yugabyte.com/docs/yugabyte-platform/bc7e19ff7baec-list-all-namespaces
+#
+# Input(s)
+# - customer_uuid: uuid - the customer uuid
+# - universe_uuid: uuid - the universe uuid
+# - table_type: str - the type of namespaces to return (YQL_TABLE_TYPE, REDIS_TABLE_TYPE, PGSQL_TABLE_TYPE, or
+# TRANSACTION_STATUS_TABLE_TYPE).
 #
 def get_database_namespaces(customer_uuid, universe_uuid, table_type='PGSQL_TABLE_TYPE') -> list:
     response = requests.get(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/universes/{universe_uuid}/namespaces",
@@ -266,6 +277,19 @@ def _set_tables_in_dr_config(customer_uuid, dr_config_uuid, storage_config_uuid,
 
 
 #
+# https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/066dda1e654a3-switchover-a-disaster-recovery-config
+#
+def _switchover_xcluster_dr(customer_uuid, dr_config_uuid, primary_universe_uuid, dr_replica_universe_uuid) -> json:
+    disaster_recovery_switchover_form_data = {
+        'primaryUniverseUuid': primary_universe_uuid,
+        'drReplicaUniverseUuid': dr_replica_universe_uuid,
+    }
+    # pprint(disaster_recovery_switchover_form_data)
+    return requests.post(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/dr_configs/{dr_config_uuid}/switchover",
+                         json=disaster_recovery_switchover_form_data, headers=API_HEADERS).json()
+
+
+#
 # Pauses the underlying xCluster replication.
 #
 def pause_xcluster_config(customer_uuid, xcluster_config_uuid) -> json:
@@ -307,7 +331,7 @@ def get_source_xcluster_dr_config(customer_uuid, source_universe_name) -> json:
 #
 #
 def create_xcluster_dr(customer_uuid, source_universe_name, target_universe_name, db_names=None, dry_run=False) -> json:
-    storage_configs = get_configs_by_type(customer_uuid, 'STORAGE')
+    storage_configs = _get_configs_by_type(customer_uuid, 'STORAGE')
     # pprint(storage_configs)
     if len(storage_configs) < 1:
         raise RuntimeError('WARN: no storage configs found, at least one is required for xCluster DR setup!')
@@ -385,8 +409,7 @@ def delete_xcluster_dr(customer_uuid, source_universe_name) -> str:
 # Ideally, these should have sizeBytes = 0 or including it will trigger a full backup/restore
 # of the existing database (this will slow the process down).
 #
-# TODO this list should be compared to the target cluster to make sure the exact same table(s)
-# already exist there too.
+# TODO this list could also be compared to the target cluster to filter down tables not in both?
 #
 def get_xcluster_dr_available_tables(customer_uuid, universe_name) -> list:
     universe_uuid = get_universe_uuid_by_name(customer_uuid, universe_name)
@@ -497,36 +520,59 @@ def remove_tables_from_xcluster_dr(customer_uuid: str, source_universe_name: str
 
 
 #
+# Performs an xCluster DR switchover (aka a planned switchover).  This effectively changes the direction
+# of the xCluster replication.
+#
+# Input(s):
+# - customer_uuid: str - the customer uuid
+# - source_universe_name: str - the name of the source universe
+#
+# If the source universe does not have an xCluster DR configuration then an exception is raised.
+#
+def perform_xcluster_dr_switchover(customer_uuid, source_universe_name):
+    dr_config = get_source_xcluster_dr_config(customer_uuid, source_universe_name)
+    # pprint(dr_config)
+    dr_config_uuid = dr_config['uuid']
+    primary_universe_uuid = dr_config['primaryUniverseUuid']
+    dr_replica_universe_uuid = dr_config['drReplicaUniverseUuid']
+
+    resp = _switchover_xcluster_dr(customer_uuid, dr_config_uuid, primary_universe_uuid, dr_replica_universe_uuid)
+    wait_for_task(customer_uuid, resp, "Switchover XCluster DR")
+
+
+#
 # Testing Section
 # ---------------
 def testing():
     user_session = _get_session_info()
     customer_uuid = user_session['customerUUID']
-    source_universe_name = 'ssherwood-xcluster-east'
-    target_universe_name = 'ssherwood-xcluster-central'
+    xcluster_east = 'ssherwood-xcluster-east'
+    xcluster_central = 'ssherwood-xcluster-central'
     include_database_names = {'yugabyte', 'yugabyte2'}
     test_task_uuid = 'aac2ded4-0b54-4818-affd-fc8ca40c69b1'
     add_list = {'00004000000030008000000000004002'}
     remove_list = {'00004000000030008000000000004002'}
 
     try:
-        execute_option = '_validate_dr_replica_tables'
-        universe_uuid = get_universe_uuid_by_name(customer_uuid, source_universe_name)
-        target_universe_uuid = get_universe_uuid_by_name(customer_uuid, target_universe_name)
+        execute_option = 'perform_xcluster_dr_switchover'
+        universe_uuid = get_universe_uuid_by_name(customer_uuid, xcluster_east)
+        target_universe_uuid = get_universe_uuid_by_name(customer_uuid, xcluster_central)
 
         match execute_option:
             case 'test':
                 dbs_list = get_database_namespaces(customer_uuid, universe_uuid)
                 pprint(dbs_list)
+            case 'perform_xcluster_dr_switchover':
+                perform_xcluster_dr_switchover(customer_uuid, xcluster_central)
             case '_get_all_ysql_tables_list':
                 pprint(_get_all_ysql_tables_list(customer_uuid, universe_uuid))
             case 'get_xcluster_dr_available_tables':
-                available_xcluster_dr_tables = get_xcluster_dr_available_tables(customer_uuid, source_universe_name)
+                available_xcluster_dr_tables = get_xcluster_dr_available_tables(customer_uuid, xcluster_east)
                 pprint(available_xcluster_dr_tables)
             case 'add_tables_to_xcluster_dr':
-                add_tables_to_xcluster_dr(customer_uuid, source_universe_name, add_list)
+                add_tables_to_xcluster_dr(customer_uuid, xcluster_east, add_list)
             case 'remove_tables_from_xcluster_dr':
-                remove_tables_from_xcluster_dr(customer_uuid, source_universe_name, remove_list)
+                remove_tables_from_xcluster_dr(customer_uuid, xcluster_east, remove_list)
             case '_validate_dr_replica_tables':
                 tables_list = [{'colocated': False,
                                 'isIndexTable': False,
@@ -541,11 +587,13 @@ def testing():
                                 'walSizeBytes': 6291456.0}]
                 _validate_dr_replica_tables(customer_uuid, target_universe_uuid, tables_list)
             case 'get_source_xcluster_dr_config':
-                pprint(get_source_xcluster_dr_config(customer_uuid, source_universe_name))
+                pprint(get_source_xcluster_dr_config(customer_uuid, xcluster_east))
+            case 'get_database_namespaces':
+                pprint(get_database_namespaces(customer_uuid, universe_uuid))
             case 'create_xcluster_dr':
-                create_xcluster_dr(customer_uuid, source_universe_name, target_universe_name, include_database_names)
+                create_xcluster_dr(customer_uuid, xcluster_east, xcluster_central, include_database_names)
             case 'delete_xcluster_dr':
-                delete_xcluster_dr(customer_uuid, source_universe_name)
+                delete_xcluster_dr(customer_uuid, xcluster_east)
             case 'get_task_data':
                 pprint(get_task_data(customer_uuid, test_task_uuid))
             case 'pause_xcluster_config':
@@ -558,6 +606,9 @@ def testing():
 
 testing()
 
+
+# https://docs.yugabyte.com/preview/yugabyte-platform/back-up-restore-universes/disaster-recovery/
+#
 # DDL handling: https://docs.yugabyte.com/preview/yugabyte-platform/back-up-restore-universes/disaster-recovery/disaster-recovery-tables/
 
 # DDL flow
