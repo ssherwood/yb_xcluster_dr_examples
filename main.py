@@ -25,8 +25,8 @@ API_HEADERS = {
 }
 
 
-# Helper function to print xcluster info
 def print_xcluster_info(xcluster_info: json) -> None:
+    """Helper function to print xCluster info"""
     print('------------------------------')
     print(f"Name: {xcluster_info['name']}")
     print(f"Status: {xcluster_info['status']}")
@@ -38,36 +38,48 @@ def print_xcluster_info(xcluster_info: json) -> None:
     print('')
 
 
-#
-# Helper function that gets the task data of a given task uuid
-#
-def get_task_data(customer_uuid, task_uuid) -> json:
+def _get_task_status(customer_uuid: str, task_uuid: str) -> json:
+    """
+    Basic function that gets a task's status for a given UUID in YBA.
+
+    See also:
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/ae83717943b4c-get-a-task-s-status
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/08618836e48aa-customer-task-data
+
+    :param customer_uuid: str - the customer UUID
+    :param task_uuid: str - the task's UUID
+    :return: json<CustomerTaskData>
+    """
     return requests.get(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/tasks/{task_uuid}",
                         headers=API_HEADERS).json()
 
 
-#
-# Helper function that waits for a given task to complete and updates the console every sleep interval.
-#
-# Input(s):
-# customer_uuid: uuid - the customer UUID
-# task_response: json - the task response body (json) from the action
-# friendly_name: str - a friendly task name to display in output (optional)
-# sleep_interval: int - an interval to sleep while task is running (optional)
-#
-def wait_for_task(customer_uuid, task_response, friendly_name="UNKNOWN", sleep_interval=15) -> str:
+def wait_for_task(customer_uuid: str, task_response, friendly_name="UNKNOWN", sleep_interval=15):
+    """
+    Utility function that waits for a given task to complete and updates the console every sleep interval.
+    On success the return will be final task status.
+
+    See also:
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/08618836e48aa-customer-task-data
+
+    :param customer_uuid: str - the customer UUID
+    :param task_response: json<ActionResponse> - the task response body (json) from the action
+    :param friendly_name: str - a friendly task name to display in output (optional, default is UNKNOWN)
+    :param sleep_interval: int - an interval to sleep while task is running (optional, default 15s)
+    :return: json<CustomerTaskData> - the final task result
+    :raises RuntimeError: if the task fails or cannot be found
+    """
     if 'taskUUID' not in task_response:
         raise RuntimeError(f"ERROR: failed to process '{friendly_name}' no taskUUID? {task_response}")
 
     task_uuid = task_response['taskUUID']
-    resource_uuid = task_response['resourceUUID']
 
     while True:
-        task_status = get_task_data(customer_uuid, task_uuid)
+        task_status = _get_task_status(customer_uuid, task_uuid)
         match task_status['status']:
             case 'Success':
                 print(f"Task '{friendly_name}': {task_uuid} finished successfully!")
-                return resource_uuid
+                return task_status
             case 'Failure':
                 failure_message = f"Task '{friendly_name}': {task_uuid} failed, but could not get the failure messages"
                 action_failed_response = requests.get(
@@ -83,17 +95,28 @@ def wait_for_task(customer_uuid, task_response, friendly_name="UNKNOWN", sleep_i
                 time.sleep(sleep_interval)
 
 
-#
-# https://api-docs.yugabyte.com/docs/yugabyte-platform/3b0b8530951e6-get-current-user-customer-uuid-auth-api-token
-#
-def _get_session_info() -> json:
+def _get_session_info():
+    """
+    Basic function that gets the current user's session info from YBA.  Primarily use this as a convenient way to get
+    the current user's `customerUUID`.
+
+    See also: https://api-docs.yugabyte.com/docs/yugabyte-platform/3b0b8530951e6-get-current-user-customer-uuid-auth-api-token
+
+    :return: json<SessionInfo>
+    """
     return requests.get(url=f"{YBA_URL}/api/v1/session_info", headers=API_HEADERS).json()
 
 
-#
-# https://api-docs.yugabyte.com/docs/yugabyte-platform/66e50c174046d-list-universes
-#
-def _get_universe_by_name(customer_uuid, universe_name: str) -> json:
+def _get_universe_by_name(customer_uuid: str, universe_name: str) -> json:
+    """
+    Basic function that returns a universe by its friendly name.
+
+    See also: https://api-docs.yugabyte.com/docs/yugabyte-platform/66e50c174046d-list-universes
+
+    :param customer_uuid:
+    :param universe_name:
+    :return:
+    """
     return requests.get(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/universes?name={universe_name}",
                         headers=API_HEADERS).json()
 
@@ -378,15 +401,15 @@ def create_xcluster_dr(customer_uuid, source_universe_name, target_universe_name
     return dr_config_uuid
 
 
-#
-# Delete an xCluster DR configuration.
-# This method can be externalized as it simplifies use of the underlying YBA API.
-#
-# Input(s)
-# - customer_uuid: str - the customer uuid
-# - source_universe_name: str - the name of the source universe
-#
 def delete_xcluster_dr(customer_uuid, source_universe_name) -> str:
+    """
+    Delete an xCluster DR configuration.
+    This method can be externalized as it simplifies use of the underlying YBA API.
+
+    :param customer_uuid: str - the customer uuid
+    :param source_universe_name: str - the name of the source universe
+    :return:
+    """
     get_universe_response = _get_universe_by_name(customer_uuid, source_universe_name)
     universe_details = next(iter(get_universe_response), None)
     if universe_details is None:
@@ -399,19 +422,20 @@ def delete_xcluster_dr(customer_uuid, source_universe_name) -> str:
 
     response = _delete_dr_config(customer_uuid, dr_config_source_uuid)
     dr_config_uuid = wait_for_task(customer_uuid, response, "Delete xCluster DR")
-    print(f"SUCCESS: deleted disaster-recovery config '{dr_config_uuid}'.")
+    print(f"SUCCESS: deleted disaster-recovery config '{response['resourceUUID']}'.")
     return dr_config_uuid
 
 
-#
-# For a given universe name, returns a list of database tables not already included in the
-# current xcluster dr config.  These are the tables that can be added to the configuration.
-# Ideally, these should have sizeBytes = 0 or including it will trigger a full backup/restore
-# of the existing database (this will slow the process down).
-#
-# TODO this list could also be compared to the target cluster to filter down tables not in both?
-#
-def get_xcluster_dr_available_tables(customer_uuid, universe_name) -> list:
+def get_xcluster_dr_available_tables(customer_uuid: str, universe_name: str) -> list:
+    """
+    For a given universe name, returns a list of database tables not already included in the current xcluster dr config.
+    These are the tables that can be added to the configuration. Ideally, these should have sizeBytes = 0 or including
+    it will trigger a full backup/restore of the existing database (this will slow the process down).
+
+    :param customer_uuid: str - the customer uuid.
+    :param universe_name: str - the name of the universe.
+    :return: list<str> - a list of database table ids not already included in the current xCluster DR config.
+    """
     universe_uuid = get_universe_uuid_by_name(customer_uuid, universe_name)
     all_tables_list = _get_all_ysql_tables_list(customer_uuid, universe_uuid)
     # pprint(all_tables_list)
@@ -424,20 +448,23 @@ def get_xcluster_dr_available_tables(customer_uuid, universe_name) -> list:
     available_tables_list = [t for t in all_tables_list if t['tableID'] not in _xcluster_dr_existing_tables_id]
     # pprint(filter_list)
 
+    # TODO this list could also be compared to the target cluster to filter down tables not in both?
+
     return available_tables_list
 
 
-#
-# Adds a set of tables to replication in an existing xCluster DR config.
-#
-# See also: https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/570cb66189f0d-set-tables-in-disaster-recovery-config
-#
-# Input(s)
-# - customer_uuid: str - the customer uuid
-# - source_universe_name: str - the name of the source universe
-# - add_tables_ids: set<str> - a set of table ids to add to replication
-#
-def add_tables_to_xcluster_dr(customer_uuid: str, source_universe_name: str, add_tables_ids: set):
+def add_tables_to_xcluster_dr(customer_uuid: str, source_universe_name: str, add_tables_ids: set) -> str:
+    """
+    Adds a set of tables to replication in an existing xCluster DR config.
+
+    See also: https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/570cb66189f0d-set-tables-in-disaster-recovery-config
+
+    :param customer_uuid: str - the customer uuid
+    :param source_universe_name: str - the name of the source universe
+    :param add_tables_ids: set<str> - a set of table ids to add to replication
+    :return: str - a resource uuid
+    :raises RuntimeError: if no tables could be found to add to the xCluster DR config
+    """
     xcluster_dr_config = get_source_xcluster_dr_config(customer_uuid, source_universe_name)
     # pprint(xcluster_dr_config)
     xcluster_dr_uuid = xcluster_dr_config['uuid']
@@ -460,25 +487,23 @@ def add_tables_to_xcluster_dr(customer_uuid: str, source_universe_name: str, add
     # pprint(merged_dr_tables_list)
 
     resp = _set_tables_in_dr_config(customer_uuid, xcluster_dr_uuid, storage_config_uuid, merged_dr_tables_list)
-    wait_for_task(customer_uuid, resp, "Add YSQL Tables")
+    return wait_for_task(customer_uuid, resp, "Add YSQL Tables")
 
 
-#
-# Validates that the target xCluster DR (replica) actually contains the table(s) that are going to be
-# added to the xCluster DR config of the source.  This cause an error as it can't replicate table(s) that don't
-# already exist on the target.
-#
-# No additional correctness is checked to ensure the replica's table(s) contains the same fields - this is left up to
-# the users to ensure the exact same DDL is being issued to both sides of the xCluster config.
-#
-# Input(s)
-# - customer_uuid: str - the customer uuid
-# - dr_replica_universe_uuid: str - the uuid of the target (replica) universe
-# - source_dr_tables_add_list: list<dict> - a list of tables to be added to the source DR
-#
-# If the target replica does not have the source table(s) then an exception will be raised
-#
-def _validate_dr_replica_tables(customer_uuid, dr_replica_universe_uuid, source_dr_tables_add_list):
+def _validate_dr_replica_tables(customer_uuid: str, dr_replica_universe_uuid: str, source_dr_tables_add_list: list):
+    """
+    Validates that the target xCluster DR (replica) actually contains the table(s) that are going to be added to the
+    xCluster DR config of the source.  This causes an error as it can't replicate table(s) that don't already exist on
+    the target.
+
+    No additional correctness is checked to ensure the replica's table(s) contains the same fields - this is left up to
+    the users to ensure the exact same DDL is being issued to both sides of the xCluster config.
+
+    :param customer_uuid: str - the customer uuid
+    :param dr_replica_universe_uuid: str - the uuid of the target (replica) universe
+    :param source_dr_tables_add_list: list<dict> - a list of tables to be added to the source DR
+    :return:
+    """
     keys_to_match = ['keySpace', 'pgSchemaName', 'tableName']  # these keys define a unique table
     replica_tables_list = _get_all_ysql_tables_list(customer_uuid, dr_replica_universe_uuid)
     replica_tables_set = {tuple(d[key] for key in keys_to_match) for d in replica_tables_list}
@@ -490,20 +515,18 @@ def _validate_dr_replica_tables(customer_uuid, dr_replica_universe_uuid, source_
         raise RuntimeError(f"ERROR: No matching table(s): {tables_not_found} found in the xCluster DR replica!")
 
 
-#
-# Removes a set of tables from replication from an existing xCluster DR config.
-#
-# This call should be made BEFORE performing a DROP TABLE operation.  Once the table(s) are removed from replication
-# drop the table(s) from the replica first and then from the primary.
-#
-# Input(s)
-# - customer_uuid: str - the customer uuid
-# - source_universe_name: str - the name of the source universe
-# - remove_tables_ids: set<str> - a set of table ids to remove
-#
-# If no table ids can be removed from the existing config an exception will be raised.
-#
-def remove_tables_from_xcluster_dr(customer_uuid: str, source_universe_name: str, remove_tables_ids: set):
+def remove_tables_from_xcluster_dr(customer_uuid: str, source_universe_name: str, remove_tables_ids: set) -> str:
+    """
+    Removes a set of tables from replication from an existing xCluster DR config.
+
+    This call should be made BEFORE performing a DROP TABLE operation.  Once the table(s) are removed from replication
+    drop the table(s) from the replica first and then from the primary.
+
+    :param customer_uuid: str - the customer uuid
+    :param source_universe_name: str - the name of the source universe
+    :param remove_tables_ids: set<str> - the set of tables to remove
+    :return: resource_uuid: str - the uuid of the resource being removed
+    """
     xcluster_dr_config = get_source_xcluster_dr_config(customer_uuid, source_universe_name)
     # pprint(xcluster_dr_config)
     xcluster_dr_uuid = xcluster_dr_config['uuid']
@@ -516,20 +539,18 @@ def remove_tables_from_xcluster_dr(customer_uuid: str, source_universe_name: str
         raise RuntimeError(f"ERROR: no table(s) can be removed from the xCluster DR config!")
 
     resp = _set_tables_in_dr_config(customer_uuid, xcluster_dr_uuid, storage_config_uuid, filtered_dr_tables_list)
-    wait_for_task(customer_uuid, resp, "Removing YSQL Tables from xCluster DR")
+    return wait_for_task(customer_uuid, resp, "Removing YSQL Tables from xCluster DR")
 
 
-#
-# Performs an xCluster DR switchover (aka a planned switchover).  This effectively changes the direction
-# of the xCluster replication.
-#
-# Input(s):
-# - customer_uuid: str - the customer uuid
-# - source_universe_name: str - the name of the source universe
-#
-# If the source universe does not have an xCluster DR configuration then an exception is raised.
-#
-def perform_xcluster_dr_switchover(customer_uuid, source_universe_name):
+def perform_xcluster_dr_switchover(customer_uuid: str, source_universe_name: str) -> str:
+    """
+    Performs an xCluster DR switchover (aka a planned switchover).  This effectively changes the direction
+    of the xCluster replication with zero RPO.
+
+    :param customer_uuid: str - the customer uuid
+    :param source_universe_name: str - the name of the source universe
+    :return: resource_uuid: str - the uuid of the resource being removed
+    """
     dr_config = get_source_xcluster_dr_config(customer_uuid, source_universe_name)
     # pprint(dr_config)
     dr_config_uuid = dr_config['uuid']
@@ -537,7 +558,7 @@ def perform_xcluster_dr_switchover(customer_uuid, source_universe_name):
     dr_replica_universe_uuid = dr_config['drReplicaUniverseUuid']
 
     resp = _switchover_xcluster_dr(customer_uuid, dr_config_uuid, primary_universe_uuid, dr_replica_universe_uuid)
-    wait_for_task(customer_uuid, resp, "Switchover XCluster DR")
+    return wait_for_task(customer_uuid, resp, "Switchover XCluster DR")
 
 
 #
@@ -595,7 +616,7 @@ def testing():
             case 'delete_xcluster_dr':
                 delete_xcluster_dr(customer_uuid, xcluster_east)
             case 'get_task_data':
-                pprint(get_task_data(customer_uuid, test_task_uuid))
+                pprint(_get_task_status(customer_uuid, test_task_uuid))
             case 'pause_xcluster_config':
                 pause_xcluster_config(customer_uuid, '')
             case 'resume_xcluster_config':
@@ -605,7 +626,6 @@ def testing():
 
 
 testing()
-
 
 # https://docs.yugabyte.com/preview/yugabyte-platform/back-up-restore-universes/disaster-recovery/
 #
