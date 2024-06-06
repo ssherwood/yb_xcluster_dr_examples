@@ -1,3 +1,34 @@
+"""
+This module provides a collection of helper methods for interacting and automating the YBA xCluster DR APIs.
+
+Overview
+- https://docs.yugabyte.com/preview/yugabyte-platform/back-up-restore-universes/disaster-recovery/
+
+DDL Handling
+- https://docs.yugabyte.com/preview/yugabyte-platform/back-up-restore-universes/disaster-recovery/disaster-recovery-tables/
+
+DDL Flows
+
+Create a Table
+--------------
+
+   1. Create Table(s) + Index(es) on Primary - NO DATA
+   2. Create Table(s) + Index(es) on Secondary - NO DATA
+   3. Add table(s) UUIDs to the managed API?
+   4. Once replication is confirmed, load data if needed
+
+NOTEs:
+ - If ANY data is in the source/target database tables it will trigger a full copy of the whole database
+ - If you try to make a DDL change on DR primary and it fails, you must also make the same attempt on DR replica and get
+   the same failure.
+
+SPECIAL RULES FOR COLOCATION!
+* If you are using Colocated tables, you CREATE TABLE on DR primary, then CREATE TABLE on DR replica making sure that
+  you force the Colocation ID to be identical to that on DR primary.
+
+:author: Shawn Sherwood
+:date: June 2024
+"""
 import json
 import time
 from pprint import pprint
@@ -66,7 +97,7 @@ def wait_for_task(customer_uuid: str, task_response, friendly_name="UNKNOWN", sl
     :param task_response: json<ActionResponse> - the task response body (json) from the action
     :param friendly_name: str - a friendly task name to display in output (optional, default is UNKNOWN)
     :param sleep_interval: int - an interval to sleep while task is running (optional, default 15s)
-    :return: json<CustomerTaskData> - the final task result
+    :return: json of CustomerTaskData (the final task result)
     :raises RuntimeError: if the task fails or cannot be found
     """
     if 'taskUUID' not in task_response:
@@ -97,60 +128,89 @@ def wait_for_task(customer_uuid: str, task_response, friendly_name="UNKNOWN", sl
 
 def _get_session_info():
     """
-    Basic function that gets the current user's session info from YBA.  Primarily use this as a convenient way to get
+    Basic function that gets the current user's session info from YBA. Primarily use this as a convenient way to get
     the current user's `customerUUID`.
 
     See also: https://api-docs.yugabyte.com/docs/yugabyte-platform/3b0b8530951e6-get-current-user-customer-uuid-auth-api-token
 
-    :return: json<SessionInfo>
+    :return: json of SessionInfo
     """
     return requests.get(url=f"{YBA_URL}/api/v1/session_info", headers=API_HEADERS).json()
 
 
-def _get_universe_by_name(customer_uuid: str, universe_name: str) -> json:
+def _get_universe_by_name(customer_uuid: str, universe_name: str):
     """
     Basic function that returns a universe by its friendly name.
 
-    See also: https://api-docs.yugabyte.com/docs/yugabyte-platform/66e50c174046d-list-universes
+    See also:
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/66e50c174046d-list-universes
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/8682dd63e9165-universe-resp
 
-    :param customer_uuid:
-    :param universe_name:
-    :return:
+    :param customer_uuid: str - the customer UUID
+    :param universe_name: str - the friendly name of the universe to be returned
+    :return: json array of UniverseResp
     """
     return requests.get(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/universes?name={universe_name}",
                         headers=API_HEADERS).json()
 
 
-#
-# https://api-docs.yugabyte.com/docs/yugabyte-platform/3ff7ead3de133-get-xcluster-config
-#
-def _get_xcluster_configs(customer_uuid, xcluster_uuid) -> json:
-    return requests.get(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/xcluster_configs/{xcluster_uuid}",
+def _get_xcluster_configs(customer_uuid, xcluster_config_uuid):
+    """
+    Basic function that gets the xCluster configration data for a given xCluster config UUID from YBA.
+
+    See also:
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/3ff7ead3de133-get-xcluster-config
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/1486cbdec4522-x-cluster-config-get-resp
+
+    :param customer_uuid: str - the customer UUID
+    :param xcluster_config_uuid: str - the xCluster Config UUID
+    :return: json of XClusterConfigGetResp
+    """
+    return requests.get(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/xcluster_configs/{xcluster_config_uuid}",
                         headers=API_HEADERS).json()
 
 
-#
-# https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/2963c1edbb9e9-get-disaster-recovery-config
-#
-def _get_dr_configs(customer_uuid, dr_uuid) -> json:
-    return requests.get(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/dr_configs/{dr_uuid}",
+def _get_xcluster_dr_configs(customer_uuid: str, xcluster_dr_uuid: str) -> json:
+    """
+    Basic function that gets an xCluster DR configuration for a given DR config UUID.
+
+    See also:
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/2963c1edbb9e9-get-disaster-recovery-config
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/db4d138705705-dr-config
+
+    :param customer_uuid: str - the customer UUID
+    :param xcluster_dr_uuid: str - the DR config UUID to return
+    :return: json of DrConfig
+    """
+    return requests.get(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/dr_configs/{xcluster_dr_uuid}",
                         headers=API_HEADERS).json()
 
 
-#
-# Return configs of a specific config type.  This is useful for getting things like STORAGE configs.
-#
-# https://api-docs.yugabyte.com/docs/yugabyte-platform/d09c43e4a8bfd-list-all-customer-configurations
-#
-def _get_configs_by_type(customer_uuid, config_type) -> json:
+def _get_configs_by_type(customer_uuid: str, config_type: str):
+    """
+    Return a Customer's configs of a specific config type. This is useful for getting things like the STORAGE configs.
+
+    See also:
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/d09c43e4a8bfd-list-all-customer-configurations
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/0e51caecbdf07-customer-config
+
+    :param customer_uuid: str - the customer UUID
+    :param config_type: enum<str> - the config type (of STORAGE, ALERTS, CALLHOME, PASSWORD_POLICY).
+    :return: json array of CustomerConfig
+    """
     response = requests.get(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/configs", headers=API_HEADERS).json()
     return list(filter(lambda config: config["type"] == config_type, response))
 
 
-#
-# Helper method to return the universeUUID of the universe from a given name.
-#
-def get_universe_uuid_by_name(customer_uuid, universe_name: str) -> str:
+def get_universe_uuid_by_name(customer_uuid: str, universe_name: str) -> str:
+    """
+    Helper function to return the universeUUID of the Universe from a given friendly name.
+
+    :param customer_uuid: str - the Customer UUID
+    :param universe_name: str - the Universe's friendly name
+    :return: str - the Universe's UUID
+    :raises RuntimeError: if the Universe is not found
+    """
     universe = next(iter(_get_universe_by_name(customer_uuid, universe_name)), None)
     if universe is None:
         raise RuntimeError(f"ERROR: failed to find a universe '{universe_name}' by name")
@@ -158,73 +218,77 @@ def get_universe_uuid_by_name(customer_uuid, universe_name: str) -> str:
         return universe['universeUUID']
 
 
-#
-# Returns a list of database "namespaces" filtered by a given type.  For xCluster DR this is going to be
-# PGSQL_TABLE_TYPE (which is the default).
-#
-# https://api-docs.yugabyte.com/docs/yugabyte-platform/bc7e19ff7baec-list-all-namespaces
-#
-# Input(s)
-# - customer_uuid: uuid - the customer uuid
-# - universe_uuid: uuid - the universe uuid
-# - table_type: str - the type of namespaces to return (YQL_TABLE_TYPE, REDIS_TABLE_TYPE, PGSQL_TABLE_TYPE, or
-# TRANSACTION_STATUS_TABLE_TYPE).
-#
-def get_database_namespaces(customer_uuid, universe_uuid, table_type='PGSQL_TABLE_TYPE') -> list:
+def get_database_namespaces(customer_uuid: str, universe_uuid: str, table_type='PGSQL_TABLE_TYPE') -> list:
+    """
+    Returns a list of database "namespaces" (database names) filtered by a given type. For xCluster DR this will be
+    PGSQL_TABLE_TYPE (which is the default).
+
+    See also:
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/bc7e19ff7baec-list-all-namespaces
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/f0d617b52337d-namespace-info-resp
+
+    :param customer_uuid: str - the Customer UUID
+    :param universe_uuid: str - the Universe UUID
+    :param table_type: str - the type of namespaces to return (e.g. YQL_TABLE_TYPE, REDIS_TABLE_TYPE, PGSQL_TABLE_TYPE,
+     TRANSACTION_STATUS_TABLE_TYPE).
+    :return: json array of NamespaceInfoResp
+    """
     response = requests.get(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/universes/{universe_uuid}/namespaces",
                             headers=API_HEADERS).json()
-    # pprint(response)
     return list(filter(lambda db: db['tableType'] == table_type, response))
 
 
-#
-# List YSQL Tables
-# See: https://api-docs.yugabyte.com/docs/yugabyte-platform/d00ca6d91e3aa-list-all-tables
-#
-# Input(s)
-# - customer_uuid: uuid - the customer uuid
-# - universe_uuid: uuid - the universe uuid
-# - include_parent_table_info: bool - ?
-# - only_supported_for_xcluster: bool - restricts results to only tables supported by xcluster
-# - dbs_list: list<str> - list of database names to include (filter any not matching); default None
-#
-def _get_all_ysql_tables_list(customer_uuid, universe_uuid, include_parent_table_info=False,
-                              only_supported_for_xcluster=True, dbs_list=None) -> json:
+def _get_all_ysql_tables_list(customer_uuid: str, universe_uuid: str, table_type='PGSQL_TABLE_TYPE',
+                              include_parent_table_info=False, only_supported_for_xcluster=True, dbs_include_list=None):
+    """
+    Returns a list of YSQL tables for a given Universe possibly filtered by type and if it is supported by xCluster.
+
+    See also:
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/d00ca6d91e3aa-list-all-tables
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/2419074f53925-table-info-resp
+
+    :param customer_uuid: str - the Customer UUID
+    :param universe_uuid: str - the Universe UUID
+    :param table_type: str - the type of tables to return
+    :param include_parent_table_info: bool - whether to include the parent table information
+    :param only_supported_for_xcluster: bool - whether to only include XCluster tables
+    :param dbs_include_list: list<str> - list of database names to include (filter out any not matching); default None
+    :return: json array of TableInfoResp (possibly filtered)
+    """
     response = requests.get(url=(f"{YBA_URL}/api/v1/customers/{customer_uuid}/universes/{universe_uuid}/tables"
                                  f"?includeParentTableInfo={str(include_parent_table_info).lower()}"
                                  f"&onlySupportedForXCluster={str(only_supported_for_xcluster).lower()}"),
                             headers=API_HEADERS).json()
     # pprint(response)
-    if dbs_list is None:
-        return list(filter(lambda t: t['tableType'] == 'PGSQL_TABLE_TYPE', response))
+    if dbs_include_list is None:
+        return list(filter(lambda t: t['tableType'] == table_type, response))
     else:
-        return list(filter(lambda t: t['tableType'] == 'PGSQL_TABLE_TYPE' and t['keySpace'] in dbs_list, response))
+        return list(filter(lambda t: t['tableType'] == table_type and t['keySpace'] in dbs_include_list, response))
 
 
-#
-# Create a xCluster DR config.
-# See: https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/d8cf017de217e-create-disaster-recovery-config
-#
-# Input:
-# - customer_uuid: string<uuid> - a customer uuid
-# - _storage_config_uuid: string<uuid> - a storage config for backup/restore of data from source to target
-# - source_universe_uuid: string<uuid> - the source universe uuid
-# - target_universe_uuid: string<uuid> - the target universe uuid
-# - dbs_include_list: list<string<uuid>> - list of database uuids to include in DR replication (defaults to None)
-# - parallelism: int - number of parallel threads used for backup/restore (optional, defaults to 8)
-# - dry_run: bool - flag to enable "dry run" mode (optional, defaults to False)
-#
-# Output:
-# - resourceUUID: string<uuid> - UUID of the resource being modified by the task
-# - taskUUID: string<uuid> - Task UUID
-#
-def _create_dr_config(customer_uuid, _storage_config_uuid, source_universe_uuid, target_universe_uuid,
-                      dbs_include_list=None, parallelism=8, dry_run=False) -> json:
+def _create_dr_config(customer_uuid: str, storage_config_uuid: str, source_universe_uuid: str,
+                      target_universe_uuid: str, dbs_include_list=None, parallelism=8, dry_run=False):
+    """
+    Creates a new xCluster DR config for given source and target universe and a required storage config.
+
+    See also:
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/d8cf017de217e-create-disaster-recovery-config
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/64d854c13e51b-ybp-task
+
+    :param customer_uuid: str - the Customer UUID
+    :param storage_config_uuid: str - a storage config for backup/restore of data from source to target
+    :param source_universe_uuid: str - the source Universe UUID
+    :param target_universe_uuid: str - the target Universe UUID
+    :param dbs_include_list: list<str> - list of database names to include (filter out any not matching); default None
+    :param parallelism: int - the number of parallel threads to use during backup/restore bootstrap; default 8
+    :param dry_run: bool - whether to perform as a "dry run"; default False
+    :return: json of YBPTask (it may be passed to wait_for_task)
+    """
     disaster_recovery_create_form_data = {
         "bootstrapParams": {
             "backupRequestParams": {
                 "parallelism": parallelism,
-                "storageConfigUUID": _storage_config_uuid
+                "storageConfigUUID": storage_config_uuid
             }
         },
         "dbs": dbs_include_list,
@@ -239,50 +303,42 @@ def _create_dr_config(customer_uuid, _storage_config_uuid, source_universe_uuid,
                          json=disaster_recovery_create_form_data, headers=API_HEADERS).json()
 
 
-#
-# Delete a xCluster DR config.
-#
-# See also: https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/defcf45434fc0-delete-xcluster-config
-#
-# Input
-# - a Customer UUID
-# - a DR Config UUID
-# - an optional flag to force the delete (default False)
-#
-# Output
-# - an HTTP response code
-# - a resourceUUID
-# - a taskUUID
-#
-def _delete_dr_config(customer_uuid, _dr_config_uuid, is_force_delete=False) -> json:
-    return requests.delete(
-        url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/dr_configs/{_dr_config_uuid}?isForceDelete={json.dumps(is_force_delete)}",
-        headers=API_HEADERS).json()
+def _delete_xcluster_dr_config(customer_uuid: str, dr_config_uuid: str, is_force_delete=False):
+    """
+    Deletes an existing xCluster DR config.
+
+    See also:
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/defcf45434fc0-delete-xcluster-config
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/64d854c13e51b-ybp-task
+
+    :param customer_uuid: str - the Customer UUID
+    :param dr_config_uuid:  str - the DR config UUID to return
+    :param is_force_delete: bool - whether to force delete the DR config; default False
+    :return: json of YBPTask (it may be passed to wait_for_task)
+    """
+    return requests.delete(url=f"{YBA_URL}/api/v1/customers/{customer_uuid}/dr_configs/{dr_config_uuid}"
+                               f"?isForceDelete={json.dumps(is_force_delete)}", headers=API_HEADERS).json()
 
 
-#
-# Low level YBA API call to update the set of tables that are included in the xCluster DR.
-# As this is a POST operation, the tables list should always contain the full set of table IDs intended to be used in
-# xCluster DR replication.  This also means that to remove tables, the POST should contain the existing set of tables
-# minus the tables to be removed (the API does not support DELETE).
-#
-# See also: https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/570cb66189f0d-set-tables-in-disaster-recovery-config
-#
-# Input(s)
-# - customer_uuid: str - the Customer UUID
-# - dr_config_uuid: str - the xCluster DR config to use
-# - storage_config_uuid: str - the backup/restore config to use
-# - tables_include_list: list<str> - list of table IDs to include in replication
-# - auto_include_indexes: bool - automatically include indexes; default: true
-# - parallelism: int - limits the number of parallel threads used to perform any backup/restore; default: 8
-#
-# Output:
-# - JSON
-#   - resourceUUID: str - the resource UUID
-#   - taskUUID: str - the task UUID
-#
-def _set_tables_in_dr_config(customer_uuid, dr_config_uuid, storage_config_uuid, tables_include_list=None,
-                             auto_include_indexes=True, parallelism=8) -> json:
+def _set_tables_in_dr_config(customer_uuid: str, dr_config_uuid: str, storage_config_uuid: str,
+                             tables_include_set=None, auto_include_indexes=True, parallelism=8):
+    """
+    Updates the set of tables that are included in the xCluster DR. As this is a POST operation, the tables list should
+    always contain the full set of table IDs intended to be used in xCluster DR replication. This also means that to
+    effectively remove tables, the POST should contain the existing set of tables minus the tables to be removed.
+
+    See also:
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/570cb66189f0d-set-tables-in-disaster-recovery-config
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/64d854c13e51b-ybp-task
+
+    :param customer_uuid: str - the Customer UUID
+    :param dr_config_uuid: str - the DR config UUID to use
+    :param storage_config_uuid: str - a storage config UUID for backup/restore of data
+    :param tables_include_set: set<str> - list of table UUIDs to include in replication
+    :param auto_include_indexes: bool - whether to automatically include indexes of the selected tables; default True
+    :param parallelism: int - the number of parallel threads to use during backup/restore bootstrap; default 8
+    :return: json of YBPTask (it may be passed to wait_for_task)
+    """
     disaster_recovery_set_tables_form_data = {
         "autoIncludeIndexTables": auto_include_indexes,
         "bootstrapParams": {
@@ -291,7 +347,7 @@ def _set_tables_in_dr_config(customer_uuid, dr_config_uuid, storage_config_uuid,
                 "storageConfigUUID": storage_config_uuid
             }
         },
-        "tables": tables_include_list
+        "tables": tables_include_set
     }
     # pprint(disaster_recovery_set_tables_form_data)
 
@@ -299,10 +355,21 @@ def _set_tables_in_dr_config(customer_uuid, dr_config_uuid, storage_config_uuid,
                          json=disaster_recovery_set_tables_form_data, headers=API_HEADERS).json()
 
 
-#
-# https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/066dda1e654a3-switchover-a-disaster-recovery-config
-#
-def _switchover_xcluster_dr(customer_uuid, dr_config_uuid, primary_universe_uuid, dr_replica_universe_uuid) -> json:
+def _switchover_xcluster_dr(customer_uuid: str, dr_config_uuid: str, primary_universe_uuid: str,
+                            dr_replica_universe_uuid: str):
+    """
+    Initiates an xCluster DR "planned" switchover.
+
+    See also:
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/branches/2.20/066dda1e654a3-switchover-a-disaster-recovery-config
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/64d854c13e51b-ybp-task
+
+    :param customer_uuid: str - the Customer UUID
+    :param dr_config_uuid: str - the DR config UUID to use
+    :param primary_universe_uuid: str - the primary Universe UUID
+    :param dr_replica_universe_uuid: str - the secondary (replica) Universe UUID
+    :return: json of YBPTask (it may be passed to wait_for_task)
+    """
     disaster_recovery_switchover_form_data = {
         'primaryUniverseUuid': primary_universe_uuid,
         'drReplicaUniverseUuid': dr_replica_universe_uuid,
@@ -312,10 +379,18 @@ def _switchover_xcluster_dr(customer_uuid, dr_config_uuid, primary_universe_uuid
                          json=disaster_recovery_switchover_form_data, headers=API_HEADERS).json()
 
 
-#
-# Pauses the underlying xCluster replication.
-#
-def pause_xcluster_config(customer_uuid, xcluster_config_uuid) -> json:
+def pause_xcluster_config(customer_uuid: str, xcluster_config_uuid: str):
+    """
+    Pauses the underlying xCluster replication.
+
+    See also:
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/3d17ffa45a16e-edit-xcluster-config
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/64d854c13e51b-ybp-task
+
+    :param customer_uuid: str - the Customer UUID
+    :param xcluster_config_uuid: str - the xCluster config UUID to pause
+    :return: json of YBPTask (it may be passed to wait_for_task)
+    """
     xcluster_replication_edit_form_data = {
         "status": "Paused"
     }
@@ -323,10 +398,18 @@ def pause_xcluster_config(customer_uuid, xcluster_config_uuid) -> json:
                         json=xcluster_replication_edit_form_data, headers=API_HEADERS).json()
 
 
-#
-# Resumes the underlying xCluster replication.
-#
-def resume_xcluster_config(customer_uuid, xcluster_config_uuid) -> json:
+def resume_xcluster_config(customer_uuid: str, xcluster_config_uuid: str):
+    """
+    Resumes the underlying xCluster replication.
+
+    See also:
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/3d17ffa45a16e-edit-xcluster-config
+     - https://api-docs.yugabyte.com/docs/yugabyte-platform/64d854c13e51b-ybp-task
+
+    :param customer_uuid: str - the Customer UUID
+    :param xcluster_config_uuid: str - the xCluster config UUID to resume
+    :return: json of YBPTask (it may be passed to wait_for_task)
+    """
     xcluster_replication_edit_form_data = {
         "status": "Running"
     }
@@ -334,10 +417,15 @@ def resume_xcluster_config(customer_uuid, xcluster_config_uuid) -> json:
                         json=xcluster_replication_edit_form_data, headers=API_HEADERS).json()
 
 
-#
-# For a given source universe returns the xcluster dr configuration associated with it.
-#
-def get_source_xcluster_dr_config(customer_uuid, source_universe_name) -> json:
+def get_source_xcluster_dr_config(customer_uuid: str, source_universe_name: str):
+    """
+    For a given source Universe returns the xCluster DR configuration associated with it.
+
+    :param customer_uuid: str - the Customer UUID
+    :param source_universe_name: str - the friendly name of the source Universe
+    :return: json of DrConfig
+    :raises RuntimeError: if the source Universe does not exist or does not have a DR config
+    """
     get_source_universe_response = _get_universe_by_name(customer_uuid, source_universe_name)
     source_universe_details = next(iter(get_source_universe_response), None)
     if source_universe_details is None:
@@ -347,19 +435,28 @@ def get_source_xcluster_dr_config(customer_uuid, source_universe_name) -> json:
         if dr_config_source_uuid is None:
             raise RuntimeError(f"ERROR: the universe '{source_universe_name}' does not have a DR config.")
         else:
-            return _get_dr_configs(customer_uuid, dr_config_source_uuid)
+            return _get_xcluster_dr_configs(customer_uuid, dr_config_source_uuid)
 
 
-#
-#
-#
-def create_xcluster_dr(customer_uuid, source_universe_name, target_universe_name, db_names=None, dry_run=False) -> json:
+def create_xcluster_dr(customer_uuid: str, source_universe_name: str, target_universe_name: str, db_names=None,
+                       dry_run=False):
+    """
+    Creates a new xCluster DR configuration for a given source and target Universe.
+
+    :param customer_uuid: str - the Customer UUID
+    :param source_universe_name: str - the friendly name of the source Universe
+    :param target_universe_name: str - the friendly name of the target Universe
+    :param db_names: set<str> - a set of YSQL database names to include in replication
+    :param dry_run: bool - whether to perform a dry run
+    :return: str - the xCluster DR config UUID created
+    :raises RuntimeError: if the Universes or Storage Config are not found or if the Universe already has a DR config
+    """
     storage_configs = _get_configs_by_type(customer_uuid, 'STORAGE')
     # pprint(storage_configs)
     if len(storage_configs) < 1:
         raise RuntimeError('WARN: no storage configs found, at least one is required for xCluster DR setup!')
 
-    storage_config_uuid = storage_configs[0]['configUUID']  # todo how do we select this at scale?
+    storage_config_uuid = storage_configs[0]['configUUID']  # todo how do we select this? we should pass in name
     # pprint(storage_config_uuid)
 
     get_source_universe_response = _get_universe_by_name(customer_uuid, source_universe_name)
@@ -391,9 +488,8 @@ def create_xcluster_dr(customer_uuid, source_universe_name, target_universe_name
     dbs_list_uuids = [d['namespaceUUID'] for d in dbs_list if d['name'] in db_names]
     # pprint(dbs_list_uuids)
 
-    create_dr_response = _create_dr_config(customer_uuid, storage_config_uuid,
-                                           source_universe_uuid, target_universe_uuid,
-                                           dbs_list_uuids, dry_run=dry_run)
+    create_dr_response = _create_dr_config(customer_uuid, storage_config_uuid, source_universe_uuid,
+                                           target_universe_uuid, dbs_list_uuids, dry_run=dry_run)
     wait_for_task(customer_uuid, create_dr_response, 'Create xCluster DR')
 
     dr_config_uuid = create_dr_response['resourceUUID']
@@ -420,7 +516,7 @@ def delete_xcluster_dr(customer_uuid, source_universe_name) -> str:
         raise RuntimeError(
             f"ERROR: source universe '{source_universe_name}' does not have a disaster-recovery config!")
 
-    response = _delete_dr_config(customer_uuid, dr_config_source_uuid)
+    response = _delete_xcluster_dr_config(customer_uuid, dr_config_source_uuid)
     dr_config_uuid = wait_for_task(customer_uuid, response, "Delete xCluster DR")
     print(f"SUCCESS: deleted disaster-recovery config '{response['resourceUUID']}'.")
     return dr_config_uuid
@@ -575,14 +671,15 @@ def testing():
     remove_list = {'00004000000030008000000000004002'}
 
     try:
-        execute_option = 'perform_xcluster_dr_switchover'
+        execute_option = '_get_xcluster_configs'
         universe_uuid = get_universe_uuid_by_name(customer_uuid, xcluster_east)
         target_universe_uuid = get_universe_uuid_by_name(customer_uuid, xcluster_central)
 
         match execute_option:
             case 'test':
-                dbs_list = get_database_namespaces(customer_uuid, universe_uuid)
-                pprint(dbs_list)
+                pprint(get_database_namespaces(customer_uuid, universe_uuid))
+            case '_get_xcluster_configs':
+                pprint(_get_xcluster_configs(customer_uuid, '123'))
             case 'perform_xcluster_dr_switchover':
                 perform_xcluster_dr_switchover(customer_uuid, xcluster_central)
             case '_get_all_ysql_tables_list':
@@ -626,22 +723,3 @@ def testing():
 
 
 testing()
-
-# https://docs.yugabyte.com/preview/yugabyte-platform/back-up-restore-universes/disaster-recovery/
-#
-# DDL handling: https://docs.yugabyte.com/preview/yugabyte-platform/back-up-restore-universes/disaster-recovery/disaster-recovery-tables/
-
-# DDL flow
-
-# Create a Table
-# https://docs.yugabyte.com/preview/yugabyte-platform/back-up-restore-universes/disaster-recovery/disaster-recovery-tables/
-#
-# 1. Create Table(s) + Index(es) on Primary - NO DATA
-# 2. Create Table(s) + Index(es) on Secondary - NO DATA
-# 3. Add table(s) UUIDs to the managed API?
-# 4. Once replication is confirmed, load data if needed
-#
-# NOTE: if any data is in the source/target this will trigger a full copy!
-#
-
-# SPECIAL RULES FOR COLOCATION!
