@@ -80,19 +80,6 @@ API_HEADERS = {
 }
 
 
-def print_xcluster_info(xcluster_info: json) -> None:
-    """Helper function to print xCluster info"""
-    print('------------------------------')
-    print(f"Name: {xcluster_info['name']}")
-    print(f"Status: {xcluster_info['status']}")
-    print(f"Paused? {xcluster_info['paused']}")
-    print(f"Source UUID: {xcluster_info['sourceUniverseUUID']}")
-    print(f"Source State: {xcluster_info['sourceUniverseState']}")
-    print(f"Target UUID: {xcluster_info['targetUniverseUUID']}")
-    print(f"Target State: {xcluster_info['targetUniverseState']}")
-    print('')
-
-
 def _get_task_status(customer_uuid: str, task_uuid: str) -> json:
     """
     Basic function that gets a task's status for a given task UUID in YBA.
@@ -834,10 +821,9 @@ def perform_xcluster_dr_sync(customer_uuid: str, source_universe_name: str) -> s
 
 def testing():
     """
-    Testing Section: use this to test out the various operations using the configurations provided (or override them for
+    Testing Block:
+    Use this section to test out the various operations using the configurations provided (or override them for
     yourself).
-
-    :return:
     """
     xcluster_east = 'ssherwood-xcluster-east'
     xcluster_central = 'ssherwood-xcluster-central'
@@ -852,7 +838,7 @@ def testing():
         east_universe_uuid = get_universe_uuid_by_name(customer_uuid, xcluster_east)
         central_universe_uuid = get_universe_uuid_by_name(customer_uuid, xcluster_central)
 
-        execute_option = 'perform_xcluster_dr_sync'
+        execute_option = 'resume_xcluster_config'
         match execute_option:
             case 'create_xcluster_dr':
                 create_xcluster_dr(customer_uuid, xcluster_east, xcluster_central, include_database_names)
@@ -861,26 +847,29 @@ def testing():
             case 'delete_xcluster_dr':
                 delete_xcluster_dr(customer_uuid, xcluster_east)
             case 'pause_xcluster_config':
-                pause_xcluster_config(customer_uuid, '')
+                dr_config = get_source_xcluster_dr_config(customer_uuid, xcluster_east)
+                resp = pause_xcluster_config(customer_uuid, dr_config['xclusterConfigUuid'])
+                wait_for_task(customer_uuid, resp, "Pause XCluster")
             case 'resume_xcluster_config':
-                resume_xcluster_config(customer_uuid, '')
+                dr_config = get_source_xcluster_dr_config(customer_uuid, xcluster_east)
+                resp = resume_xcluster_config(customer_uuid, dr_config['xclusterConfigUuid'])
+                wait_for_task(customer_uuid, resp, "Resume XCluster")
             case 'get_database_namespaces':
                 pprint(get_database_namespaces(customer_uuid, east_universe_uuid))
             case 'get_xcluster_dr_available_tables':
-                available_xcluster_dr_tables = get_xcluster_dr_available_tables(customer_uuid, xcluster_east)
-                pprint(available_xcluster_dr_tables)
+                pprint(get_xcluster_dr_available_tables(customer_uuid, xcluster_east))
             case 'add_tables_to_xcluster_dr':
-                add_tables_to_xcluster_dr(customer_uuid, xcluster_east, add_list)
+                pprint(add_tables_to_xcluster_dr(customer_uuid, xcluster_east, add_list))
             case 'remove_tables_from_xcluster_dr':
-                remove_tables_from_xcluster_dr(customer_uuid, xcluster_east, remove_list)
+                pprint(remove_tables_from_xcluster_dr(customer_uuid, xcluster_east, remove_list))
             case 'perform_xcluster_dr_switchover':
-                perform_xcluster_dr_switchover(customer_uuid, xcluster_central)
+                pprint(perform_xcluster_dr_switchover(customer_uuid, xcluster_central))
             case 'perform_xcluster_dr_failover':
-                perform_xcluster_dr_failover(customer_uuid, xcluster_east)
+                pprint(perform_xcluster_dr_failover(customer_uuid, xcluster_east))
             case 'perform_xcluster_dr_repair':
-                perform_xcluster_dr_repair(customer_uuid, xcluster_central)
+                pprint(perform_xcluster_dr_repair(customer_uuid, xcluster_central))
             case 'perform_xcluster_dr_sync':
-                perform_xcluster_dr_sync(customer_uuid, xcluster_east)
+                pprint(perform_xcluster_dr_sync(customer_uuid, xcluster_east))
             case '_get_task_status':
                 pprint(_get_task_status(customer_uuid, test_task_uuid))
             case '_get_xcluster_configs':
@@ -902,8 +891,7 @@ def testing():
                 _validate_dr_replica_tables(customer_uuid, central_universe_uuid, tables_list)
             case '_get_xcluster_dr_safetime':
                 dr_config = get_source_xcluster_dr_config(customer_uuid, xcluster_east)
-                resp = _get_xcluster_dr_safetime(customer_uuid, dr_config['uuid'])
-                pprint(resp)
+                pprint(_get_xcluster_dr_safetime(customer_uuid, dr_config['uuid']))
     except Exception as ex:
         print(ex)
 
